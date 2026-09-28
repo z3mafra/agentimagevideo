@@ -1,0 +1,14 @@
+{
+  "name": "agentimagevideo",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Sistema de presets de geração de imagem/vídeo sobre a Higgsfield API",
+  "type": "module",
+  "engines": {
+    "node": ">=18.17"
+  },
+  "scripts": {
+    "start": "node src/server.js",
+    "test": "node --test test/*.test.js"
+  }
+}
