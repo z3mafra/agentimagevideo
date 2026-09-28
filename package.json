@@ -5,10 +5,10 @@
   "description": "Sistema de presets de geração de imagem/vídeo sobre a Higgsfield API",
   "type": "module",
   "engines": {
-    "node": ">=18.17"
+    "node": ">=20.6"
   },
   "scripts": {
-    "start": "node src/server.js",
+    "start": "node --env-file=.env src/server.js",
     "test": "node --test test/*.test.js"
   }
 }
