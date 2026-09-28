@@ -46,10 +46,7 @@ export function buildPresetRequest(presetName, inputs) {
 
   // Merge: inputs fornecidos sobre o bodyBase; campos não fornecidos mantêm o valor do preset.
   const body = { ...preset.bodyBase };
-  for (const [k, v] of Object.entries(inputs)) if (v !== undefined && k !== 'prompt') body[k] = v;
-
-  // Prompt final = prompt-base do preset + prompt do usuário (se houver).
-  body.prompt = [preset.promptBase, inputs.prompt].filter((p) => typeof p === 'string' && p.trim()).join('\n\n');
+  for (const [k, v] of Object.entries(inputs)) if (v !== undefined) body[k] = typeof v === 'string' ? v.trim() : v;
 
   const missing = Object.entries(preset.fields)
     .filter(([k, spec]) => spec.required && (body[k] === undefined || body[k] === ''))

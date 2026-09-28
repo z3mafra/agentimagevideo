@@ -1,79 +1,60 @@
-# agentimagevideo — presets sobre a Higgsfield API
+# agentimagevideo — gerador de imagens e vídeos (Higgsfield API)
 
-Um preset é `{ name, model, mediaType, endpoint, promptBase, bodyBase, fields }`
-(`src/presets.js`). A função `generatePreset(presetName, inputs)` resolve o
-preset, faz o merge dos inputs sobre o `bodyBase`, submete a geração **uma
-única vez** e faz polling do `status_url` até um status terminal.
+Aplicação web simples: você escolhe um preset, escreve o texto (prompt), clica
+em **Gerar** e vê o resultado na própria página. O navegador fala só com este
+servidor; a chave da Higgsfield fica no servidor e nunca vai para o browser.
 
-## Rodando
+## Como rodar no seu computador
 
-```bash
-cp .env.example .env   # preencha HF_API_KEY_ID / HF_API_KEY_SECRET
-set -a; . ./.env; set +a
-npm start              # http://localhost:3000
-npm test
-```
+1. Instale o **Node.js LTS** (versão 20.6 ou mais nova) em https://nodejs.org.
+2. Baixe o projeto (GitHub → **Code** → **Download ZIP**) e descompacte.
+3. Na pasta do projeto, crie um arquivo chamado `.env` com:
+   ```
+   HF_API_KEY_ID=seu_id_aqui
+   HF_API_KEY_SECRET=seu_segredo_aqui
+   ```
+4. Abra um terminal na pasta e rode:
+   ```
+   npm start
+   ```
+5. Abra **http://localhost:3000** no navegador.
 
-Node ≥ 18.17, sem dependências. As credenciais só existem no servidor; o header
-enviado é `Authorization: Key ${HF_API_KEY_ID}:${HF_API_KEY_SECRET}` e nunca vai
-para um host diferente de `HF_API_BASE_URL`.
+Cada geração consome créditos da sua conta Higgsfield. `npm test` roda os
+testes automáticos (não chamam a API real).
 
 ## Presets
 
-| Preset (`:name`) | Modelo | Mídia | Endpoint | bodyBase | Campos aceitos |
-|---|---|---|---|---|---|
-| `corte-para-reels` | Kling 2.5 Turbo | vídeo | `POST /kling-video/v2.5-turbo/standard/image-to-video` | — | `prompt`, `image_url` (obrigatório) |
-| `imagem-de-produto` | Marketing Studio Image (2.5 Flare) | imagem | `POST /marketing-studio/image/flare` | `resolution: "2k"`, `aspect_ratio: "1:1"`, `quality: "high"`, `enhance_prompt: false` | `prompt`, `resolution`, `aspect_ratio`, `quality`, `enhance_prompt`, `preset_id`, `image_urls` |
-| `b-roll-de-tela` | MiniMax H3 | vídeo | `POST /minimax/h3/text-to-video` | — | `prompt` |
+| Preset | Mídia | Endpoint Higgsfield | Corpo enviado |
+|---|---|---|---|
+| Corte para Reels | vídeo | `POST /kling-video/v2.5-turbo/standard/image-to-video` | `{ prompt, image_url }` |
+| Imagem de produto | imagem | `POST /marketing-studio/image/flare` | `{ prompt, resolution: "2k", aspect_ratio: "1:1", quality: "high", enhance_prompt: false }` |
+| B-roll de tela | vídeo | `POST /minimax/hailuo-2.3/standard/text-to-video` | `{ prompt }` |
 
-- **Prompt**: o prompt final é o `promptBase` do preset seguido do `prompt` do
-  usuário (se enviado).
-- **Merge**: campos enviados pelo usuário substituem os do `bodyBase`; campos não
-  enviados mantêm o valor do preset.
-- **Campos fora da lista** retornam 400 sem chamar a API.
-- **Preset de marca** (Imagem de produto): pegue um `preset_id` em
-  `GET /api/presets/imagem-de-produto/catalog` (→ `GET /marketing-studio/image/presets`)
-  e envie `preset_id` + `image_urls` com 1–2 URLs (produto + referência
-  opcional). Nesse modo `enhance_prompt` passa a `true`, a menos que você o envie.
-- **Saída**: `outputUrl` vem de `video.url` (vídeos) ou `images[0].url` (imagem)
-  no payload `completed`; o payload completo fica em `result`.
+O prompt é obrigatório. A URL de imagem só aparece (e só é obrigatória) no
+Corte para Reels. Presets ficam em `src/presets.js`; adicionar um é adicionar
+uma entrada lá.
 
-Adicionar um preset = uma nova entrada em `PRESETS`.
-
-## Endpoints da aplicação
+## Rotas do backend
 
 | Método | Rota | O quê |
 |---|---|---|
-| GET | `/api/presets` | Lista os presets |
-| POST | `/api/presets/:name/generate` | Gera e espera o resultado. `?wait=false` só submete e devolve 202 |
-| GET | `/api/presets/:name/catalog` | Presets de marca do Marketing Studio (`preset_id`) |
-| GET | `/api/requests/:requestId/status` | Re-consulta o status (`?wait=true` continua o polling) |
-
-```bash
-curl -X POST localhost:3000/api/presets/corte-para-reels/generate \
-  -H 'content-type: application/json' \
-  -d '{"prompt":"A slow cinematic tracking shot along a sunlit coastal road.","image_url":"https://example.com/first-frame.jpg"}'
-
-curl localhost:3000/api/presets/imagem-de-produto/catalog
-curl -X POST localhost:3000/api/presets/imagem-de-produto/generate \
-  -H 'content-type: application/json' \
-  -d '{"prompt":"garrafa de perfume","preset_id":"<id>","image_urls":["https://example.com/produto.png"]}'
-
-curl -X POST 'localhost:3000/api/presets/b-roll-de-tela/generate?wait=false' \
-  -H 'content-type: application/json' -d '{"prompt":"dashboard de analytics"}'
-```
+| GET | `/` | Interface web |
+| POST | `/api/presets/:name/generate` | Recebe `{ prompt, image_url? }`, dispara o POST do preset e retorna `{ request_id }` |
+| GET | `/api/presets/status/:request_id` | Repassa `GET /requests/{request_id}/status` |
+| GET | `/api/presets` | Lista os presets (usada pela interface para montar as abas) |
+| GET | `/api/presets/:name/catalog` | Presets de marca do Marketing Studio (de uma etapa anterior; a interface não usa) |
 
 ## Fluxo assíncrono e erros
 
-- A submissão retorna `request_id` e `status_url`; o polling usa o `status_url`
-  (ou `/requests/{id}/status` se o `status_url` apontar para outro host, para
-  não vazar credenciais). Intervalo de 2 s crescendo até 10 s.
-- Terminal: `completed`, `failed`, `nsfw`, `canceled`.
-- **O POST nunca é repetido.** Timeout, erro de rede ou 5xx na submissão viram
-  502 com a indicação de que a geração pode ter sido aceita.
-- GETs (status, catálogo) usam backoff exponencial limitado (até 5 novas
-  tentativas, teto 30 s) só para rede/timeout/5xx. 401/403 → 502 "credenciais
-  rejeitadas"; 400/422 e outros 4xx → 422 com a resposta da Higgsfield; nada
-  disso é repetido.
-- Se o polling passar de `POLL_TIMEOUT_MS`, a rota devolve 202 com `request_id`
-  e o link de status; nada é re-submetido.
+- O POST de geração é feito **uma única vez**. Se der timeout, erro de rede ou
+  5xx, a interface avisa que o pedido pode ter chegado e **não reenvia**.
+- A interface consulta o status a cada 2 s (subindo até 10 s) até `completed`,
+  `failed`, `nsfw` ou `canceled`, e mostra cada caso claramente, sem tentar de
+  novo sozinha.
+- Backoff exponencial limitado só para rede/5xx, tanto no servidor (consulta
+  à Higgsfield) quanto no navegador (consulta ao servidor). 401/403/400/422
+  param na hora. As respostas de erro do servidor trazem `retryable` para a
+  interface saber se deve continuar.
+- Se a consulta demorar demais ou o servidor ficar fora do ar, a interface
+  mostra o `request_id` e um botão **Continuar consultando** — que só consulta
+  o status, nunca reenvia a geração.

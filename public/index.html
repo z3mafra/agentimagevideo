@@ -1,0 +1,329 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Gerador de mídia</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --card: #ffffff; --text: #1b1f24; --muted: #5d6673; --border: #d9dde3;
+    --accent: #3b5bdb; --accent-text: #ffffff; --ok: #2b8a3e; --warn: #b35c00; --err: #c92a2a;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #14171b; --card: #1c2026; --text: #e7eaee; --muted: #9aa3ad; --border: #313842;
+      --accent: #748ffc; --accent-text: #0e1116; --ok: #69db7c; --warn: #ffa94d; --err: #ff8787;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 16px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  main { max-width: 720px; margin: 0 auto; padding: 32px 16px 64px; }
+  h1 { font-size: 1.5rem; margin: 0 0 20px; }
+  .card { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 20px; }
+  .tabs { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 20px; }
+  .tab { flex: 1 1 160px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 8px; background: transparent;
+         color: var(--text); font: inherit; cursor: pointer; text-align: left; }
+  .tab small { display: block; color: var(--muted); font-size: 0.8rem; }
+  .tab[aria-selected="true"] { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
+  .tab:disabled { cursor: not-allowed; opacity: 0.6; }
+  label { display: block; font-weight: 600; margin: 16px 0 6px; }
+  textarea, input[type="url"] { width: 100%; padding: 10px 12px; border: 1px solid var(--border); border-radius: 8px;
+         background: var(--bg); color: var(--text); font: inherit; }
+  textarea { min-height: 110px; resize: vertical; }
+  .hint { color: var(--muted); font-size: 0.85rem; margin-top: 4px; }
+  .actions { margin-top: 20px; display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+  button.primary { background: var(--accent); color: var(--accent-text); border: 0; border-radius: 8px; padding: 10px 22px;
+         font: inherit; font-weight: 600; cursor: pointer; }
+  button.primary:disabled { opacity: 0.5; cursor: not-allowed; }
+  button.secondary { background: transparent; color: var(--accent); border: 1px solid var(--accent); border-radius: 8px;
+         padding: 8px 14px; font: inherit; cursor: pointer; }
+  #status { margin-top: 20px; padding: 12px 14px; border-radius: 8px; border: 1px solid var(--border); display: none; }
+  #status.show { display: block; }
+  #status.ok { border-color: var(--ok); } #status.warn { border-color: var(--warn); } #status.err { border-color: var(--err); }
+  #status .title { font-weight: 600; }
+  #status.ok .title { color: var(--ok); } #status.warn .title { color: var(--warn); } #status.err .title { color: var(--err); }
+  #status .detail { color: var(--muted); font-size: 0.9rem; margin-top: 4px; word-break: break-word; }
+  .spinner { display: inline-block; width: 14px; height: 14px; margin-right: 8px; vertical-align: -2px; border: 2px solid var(--border);
+         border-top-color: var(--accent); border-radius: 50%; animation: spin 0.8s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  #preview { margin-top: 20px; }
+  #preview img, #preview video { max-width: 100%; border-radius: 8px; display: block; background: #000; }
+  #preview a { display: inline-block; margin-top: 8px; color: var(--accent); }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Gerador de imagens e vídeos</h1>
+  <div class="card">
+    <div class="tabs" role="tablist" id="tabs"></div>
+
+    <form id="form" novalidate>
+      <label for="prompt">Descreva o que você quer gerar</label>
+      <textarea id="prompt" required placeholder="Ex.: um tênis branco girando sobre fundo neon"></textarea>
+
+      <div id="imageField" hidden>
+        <label for="imageUrl">URL da imagem (primeiro quadro do vídeo)</label>
+        <input id="imageUrl" type="url" placeholder="https://..." inputmode="url">
+        <div class="hint">Cole o link público de uma imagem (começando com https://).</div>
+      </div>
+
+      <div class="actions">
+        <button type="submit" class="primary" id="generate">Gerar</button>
+      </div>
+    </form>
+
+    <div id="status" role="status" aria-live="polite">
+      <div class="title" id="statusTitle"></div>
+      <div class="detail" id="statusDetail"></div>
+      <div class="actions" id="statusActions" hidden>
+        <button type="button" class="secondary" id="resume">Continuar consultando</button>
+      </div>
+    </div>
+
+    <div id="preview"></div>
+  </div>
+</main>
+
+<script>
+(() => {
+  const TERMINAL = ['completed', 'failed', 'nsfw', 'canceled'];
+  const POLL_START_MS = 2000, POLL_MAX_MS = 10000;          // intervalo normal de consulta
+  const RETRY_BASE_MS = 1000, RETRY_MAX_MS = 30000;          // backoff só para rede/5xx
+  const MAX_CONSECUTIVE_FAILURES = 6;
+  const MAX_POLL_MS = 15 * 60 * 1000;
+
+  const $ = (id) => document.getElementById(id);
+  const els = {
+    tabs: $('tabs'), form: $('form'), prompt: $('prompt'), imageField: $('imageField'), imageUrl: $('imageUrl'),
+    generate: $('generate'), status: $('status'), statusTitle: $('statusTitle'), statusDetail: $('statusDetail'),
+    statusActions: $('statusActions'), resume: $('resume'), preview: $('preview'),
+  };
+
+  let presets = [];
+  let active = null;       // preset selecionado
+  let busy = false;        // geração em andamento (polling ativo)
+  let pending = null;      // { requestId, preset } de uma geração cujo polling foi pausado
+
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+  function setBusy(value) {
+    busy = value;
+    els.generate.disabled = value;
+    els.generate.textContent = value ? 'Gerando...' : 'Gerar';
+    els.tabs.querySelectorAll('button').forEach((b) => { b.disabled = value; });
+  }
+
+  function showStatus(kind, title, detail = '', { spinner = false, resumable = false } = {}) {
+    els.status.className = `show ${kind}`;
+    els.statusTitle.textContent = '';
+    if (spinner) {
+      const s = document.createElement('span');
+      s.className = 'spinner';
+      els.statusTitle.appendChild(s);
+    }
+    els.statusTitle.appendChild(document.createTextNode(title));
+    els.statusDetail.textContent = detail;
+    els.statusActions.hidden = !resumable;
+  }
+
+  function safeUrl(value) {
+    try {
+      const u = new URL(value);
+      return u.protocol === 'https:' || u.protocol === 'http:' ? u.href : null;
+    } catch { return null; }
+  }
+
+  function renderTabs() {
+    els.tabs.textContent = '';
+    for (const p of presets) {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'tab';
+      b.setAttribute('role', 'tab');
+      b.setAttribute('aria-selected', String(p.key === active?.key));
+      b.textContent = p.name;
+      const small = document.createElement('small');
+      small.textContent = p.mediaType === 'image' ? 'Imagem' : 'Vídeo';
+      b.appendChild(small);
+      b.addEventListener('click', () => selectPreset(p.key));
+      els.tabs.appendChild(b);
+    }
+  }
+
+  function selectPreset(key) {
+    if (busy) return;
+    active = presets.find((p) => p.key === key);
+    els.imageField.hidden = !active.requiresImage;
+    renderTabs();
+  }
+
+  function renderPreview(preset, result) {
+    els.preview.textContent = '';
+    const raw = preset.mediaType === 'image' ? result?.images?.[0]?.url : result?.video?.url;
+    const url = safeUrl(raw);
+    if (!url) {
+      showStatus('warn', 'Concluído, mas a resposta não trouxe o link da mídia.', JSON.stringify(result).slice(0, 500));
+      return;
+    }
+    const media = document.createElement(preset.mediaType === 'image' ? 'img' : 'video');
+    media.src = url;
+    if (preset.mediaType === 'image') media.alt = 'Imagem gerada';
+    else { media.controls = true; media.playsInline = true; }
+    const link = document.createElement('a');
+    link.href = url; link.target = '_blank'; link.rel = 'noopener'; link.textContent = 'Abrir em nova aba';
+    els.preview.append(media, link);
+  }
+
+  function showTerminal(preset, data, requestId) {
+    const detail = `request_id: ${requestId}`;
+    switch (data.status) {
+      case 'completed':
+        showStatus('ok', 'Pronto!', detail);
+        renderPreview(preset, data);
+        break;
+      case 'nsfw':
+        showStatus('err', 'Bloqueado pelo filtro de conteúdo (NSFW).',
+          `A Higgsfield recusou o resultado. Ajuste o texto ou a imagem e gere de novo. ${detail}`);
+        break;
+      case 'failed':
+        showStatus('err', 'A geração falhou.', `${data.error || data.detail || data.message || ''} ${detail}`.trim());
+        break;
+      case 'canceled':
+        showStatus('warn', 'A geração foi cancelada.', detail);
+        break;
+    }
+  }
+
+  async function readBody(res) {
+    try { return await res.json(); } catch { return {}; }
+  }
+
+  // Consulta o status até um estado terminal. Nunca re-envia a geração.
+  async function poll(requestId, preset) {
+    const started = Date.now();
+    let interval = POLL_START_MS;
+    let failures = 0;
+    let lastStatus = 'queued';
+
+    while (true) {
+      let res = null, data = {};
+      try {
+        res = await fetch(`/api/presets/status/${encodeURIComponent(requestId)}`, { cache: 'no-store' });
+        data = await readBody(res);
+      } catch { res = null; }
+
+      if (res && res.ok) {
+        failures = 0;
+        lastStatus = data.status || lastStatus;
+        if (TERMINAL.includes(data.status)) return showTerminal(preset, data, requestId);
+        showStatus('', 'Gerando...', `Status: ${lastStatus} · request_id: ${requestId}`, { spinner: true });
+      } else {
+        // Rede ou 5xx retryable: backoff limitado. Auth/validação: para na hora.
+        const retryable = !res || (res.status >= 500 && data.retryable !== false);
+        if (!retryable) {
+          showStatus('err', 'Não foi possível consultar o status.', `${data.error || `HTTP ${res.status}`} · request_id: ${requestId}`);
+          return;
+        }
+        failures += 1;
+        if (failures > MAX_CONSECUTIVE_FAILURES) {
+          pending = { requestId, preset };
+          showStatus('warn', 'Sem resposta do servidor no momento.',
+            `A geração não foi reenviada. request_id: ${requestId}`, { resumable: true });
+          return;
+        }
+        const backoff = Math.min(RETRY_MAX_MS, RETRY_BASE_MS * 2 ** failures);
+        showStatus('', 'Gerando...', `Conexão instável, tentando consultar de novo... · request_id: ${requestId}`, { spinner: true });
+        await sleep(backoff / 2 + Math.random() * backoff / 2);
+        continue;
+      }
+
+      if (Date.now() - started > MAX_POLL_MS) {
+        pending = { requestId, preset };
+        showStatus('warn', 'Ainda em processamento.',
+          `Está demorando mais que o normal. A geração não foi reenviada. request_id: ${requestId}`, { resumable: true });
+        return;
+      }
+      await sleep(interval);
+      interval = Math.min(POLL_MAX_MS, Math.round(interval * 1.5));
+    }
+  }
+
+  async function runPoll(requestId, preset) {
+    pending = null;
+    setBusy(true);
+    try {
+      await poll(requestId, preset);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  els.resume.addEventListener('click', () => {
+    if (pending && !busy) runPoll(pending.requestId, pending.preset);
+  });
+
+  els.form.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    if (busy || !active) return;
+
+    const prompt = els.prompt.value.trim();
+    if (!prompt) {
+      showStatus('err', 'Escreva um texto (prompt) antes de gerar.');
+      els.prompt.focus();
+      return;
+    }
+    const payload = { prompt };
+    if (active.requiresImage) {
+      const imageUrl = safeUrl(els.imageUrl.value.trim());
+      if (!imageUrl) {
+        showStatus('err', 'Informe a URL de uma imagem (https://...).');
+        els.imageUrl.focus();
+        return;
+      }
+      payload.image_url = imageUrl;
+    }
+
+    const preset = active;
+    els.preview.textContent = '';
+    pending = null;
+    setBusy(true);
+    showStatus('', 'Gerando...', 'Enviando pedido...', { spinner: true });
+
+    let requestId;
+    try {
+      // Um único envio. Se falhar de forma ambígua, NÃO é repetido automaticamente.
+      const res = await fetch(`/api/presets/${encodeURIComponent(preset.key)}/generate`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      const data = await readBody(res);
+      if (!res.ok || !data.request_id) {
+        const extra = data.missing ? ` Campos faltando: ${data.missing.join(', ')}.` : '';
+        showStatus('err', 'Não foi possível iniciar a geração.', `${data.error || `HTTP ${res.status}`}${extra}`);
+        setBusy(false);
+        return;
+      }
+      requestId = data.request_id;
+    } catch {
+      showStatus('err', 'Falha de conexão ao enviar o pedido.',
+        'O pedido pode ou não ter chegado. Ele não foi reenviado automaticamente; confira antes de gerar de novo.');
+      setBusy(false);
+      return;
+    }
+    setBusy(false);
+    await runPoll(requestId, preset);
+  });
+
+  fetch('/api/presets')
+    .then((r) => r.json())
+    .then((data) => {
+      presets = data.presets || [];
+      if (presets.length) selectPreset(presets[0].key);
+    })
+    .catch(() => showStatus('err', 'Não foi possível carregar os presets. O servidor está rodando?'));
+})();
+</script>
+</body>
+</html>

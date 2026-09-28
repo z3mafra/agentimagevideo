@@ -1,6 +1,6 @@
 // Registro de presets.
 //
-// Cada preset = { name, model, mediaType, endpoint, promptBase, bodyBase, fields }.
+// Cada preset = { name, model, mediaType, endpoint, bodyBase, fields }.
 // - endpoint: path confirmado na Higgsfield API.
 // - bodyBase: campos fixos do preset (só são substituídos se o usuário os enviar).
 // - fields: únicos campos que o usuário pode enviar (os documentados para o endpoint).
@@ -14,12 +14,9 @@ export const PRESETS = {
     model: 'Kling 2.5 Turbo (image-to-video standard)',
     mediaType: 'video',
     endpoint: '/kling-video/v2.5-turbo/standard/image-to-video',
-    promptBase:
-      'Vertical short-form video for Instagram Reels, subject centered and fully in frame, ' +
-      'dynamic but smooth camera motion, punchy pacing.',
     bodyBase: {},
     fields: {
-      prompt: { type: 'string' },
+      prompt: { type: 'string', required: true },
       image_url: { type: 'string', required: true },
     },
     outputUrl: (result) => result?.video?.url ?? null,
@@ -30,12 +27,9 @@ export const PRESETS = {
     model: 'Marketing Studio Image (2.5 Flare)',
     mediaType: 'image',
     endpoint: '/marketing-studio/image/flare',
-    promptBase:
-      'Commercial product photograph, studio lighting, sharp focus on the product, premium brand look, ' +
-      'clean composition.',
     bodyBase: { resolution: '2k', aspect_ratio: '1:1', quality: 'high', enhance_prompt: false },
     fields: {
-      prompt: { type: 'string' },
+      prompt: { type: 'string', required: true },
       resolution: { type: 'string' },
       aspect_ratio: { type: 'string' },
       quality: { type: 'string' },
@@ -58,15 +52,12 @@ export const PRESETS = {
 
   'b-roll-de-tela': {
     name: 'B-roll de tela',
-    model: 'MiniMax H3 (text-to-video)',
+    model: 'MiniMax Hailuo 2.3 (standard text-to-video)',
     mediaType: 'video',
-    endpoint: '/minimax/h3/text-to-video',
-    promptBase:
-      'Screen-recording style B-roll sequence: close-up of a modern device screen showing a clean software ' +
-      'interface, smooth cursor movement and scrolling, shallow depth of field, soft ambient office light.',
+    endpoint: '/minimax/hailuo-2.3/standard/text-to-video',
     bodyBase: {},
     fields: {
-      prompt: { type: 'string' },
+      prompt: { type: 'string', required: true },
     },
     outputUrl: (result) => result?.video?.url ?? null,
   },
@@ -94,8 +85,8 @@ export function listPresets(presets = PRESETS) {
     model: p.model,
     mediaType: p.mediaType,
     endpoint: p.endpoint,
-    promptBase: p.promptBase,
     bodyBase: p.bodyBase,
     fields: Object.keys(p.fields),
+    requiresImage: !!p.fields.image_url?.required,
   }));
 }

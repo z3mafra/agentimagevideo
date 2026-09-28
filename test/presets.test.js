@@ -44,9 +44,17 @@ test('Corte para Reels: endpoint Kling e image_url obrigatório', () => {
   });
   const r = buildPresetRequest('corte-para-reels', { prompt: 'estrada costeira', image_url: 'https://cdn/f.jpg' });
   assert.equal(r.path, '/kling-video/v2.5-turbo/standard/image-to-video');
-  assert.deepEqual(Object.keys(r.body).sort(), ['image_url', 'prompt']);
-  assert.ok(r.body.prompt.startsWith(PRESETS['corte-para-reels'].promptBase));
-  assert.ok(r.body.prompt.endsWith('estrada costeira'));
+  assert.deepEqual(r.body, { prompt: 'estrada costeira', image_url: 'https://cdn/f.jpg' });
+});
+
+test('prompt é obrigatório em todos os presets', () => {
+  for (const [key, preset] of Object.entries(PRESETS)) {
+    const inputs = { prompt: '   ', ...(preset.fields.image_url ? { image_url: 'https://cdn/f.jpg' } : {}) };
+    assert.throws(() => buildPresetRequest(key, inputs), (err) => {
+      assert.ok(err.details.missing.includes('prompt'));
+      return true;
+    });
+  }
 });
 
 test('Imagem de produto: bodyBase mantido quando não fornecido, sobrescrito quando fornecido', () => {
@@ -59,23 +67,23 @@ test('Imagem de produto: bodyBase mantido quando não fornecido, sobrescrito qua
 });
 
 test('Imagem de produto com preset de marca: exige image_urls (1–2) e liga enhance_prompt', () => {
-  assert.throws(() => buildPresetRequest('imagem-de-produto', { preset_id: 'p1' }), /image_urls/);
-  assert.throws(() => buildPresetRequest('imagem-de-produto', { preset_id: 'p1', image_urls: ['a', 'b', 'c'] }), PresetInputError);
-  const r = buildPresetRequest('imagem-de-produto', { preset_id: 'p1', image_urls: ['https://cdn/p.png'] });
+  assert.throws(() => buildPresetRequest('imagem-de-produto', { prompt: 'x', preset_id: 'p1' }), /image_urls/);
+  assert.throws(() => buildPresetRequest('imagem-de-produto', { prompt: 'x', preset_id: 'p1', image_urls: ['a', 'b', 'c'] }), PresetInputError);
+  const r = buildPresetRequest('imagem-de-produto', { prompt: 'x', preset_id: 'p1', image_urls: ['https://cdn/p.png'] });
   assert.equal(r.body.enhance_prompt, true);
   assert.equal(r.body.preset_id, 'p1');
-  const explicit = buildPresetRequest('imagem-de-produto', { preset_id: 'p1', image_urls: ['u'], enhance_prompt: false });
+  const explicit = buildPresetRequest('imagem-de-produto', { prompt: 'x', preset_id: 'p1', image_urls: ['u'], enhance_prompt: false });
   assert.equal(explicit.body.enhance_prompt, false);
 });
 
 test('B-roll de tela: só prompt', () => {
   const r = buildPresetRequest('b-roll-de-tela', { prompt: 'dashboard' });
-  assert.equal(r.path, '/minimax/h3/text-to-video');
+  assert.equal(r.path, '/minimax/hailuo-2.3/standard/text-to-video');
   assert.deepEqual(Object.keys(r.body), ['prompt']);
 });
 
 test('rejeita campos não documentados e tipos errados', () => {
-  assert.throws(() => buildPresetRequest('b-roll-de-tela', { duration: 10 }), (err) => {
+  assert.throws(() => buildPresetRequest('b-roll-de-tela', { prompt: 'x', duration: 10 }), (err) => {
     assert.deepEqual(err.details.unknown, ['duration']);
     return true;
   });
@@ -89,7 +97,7 @@ test('generatePreset: POST único com auth, polling até completed e URL do víd
     () => jsonResponse(503, { detail: 'busy' }),
     () => jsonResponse(200, { status: 'completed', video: { url: 'https://cdn/v.mp4' } }),
   ]);
-  const out = await generatePreset('corte-para-reels', { image_url: 'https://cdn/f.jpg' }, { client: makeClient(fetchImpl), poll: { sleep: noSleep } });
+  const out = await generatePreset('corte-para-reels', { prompt: 'x', image_url: 'https://cdn/f.jpg' }, { client: makeClient(fetchImpl), poll: { sleep: noSleep } });
   assert.equal(out.result.status, 'completed');
   assert.equal(out.outputUrl, 'https://cdn/v.mp4');
   assert.equal(fetchImpl.calls.filter((c) => c.method === 'POST').length, 1);
@@ -108,7 +116,7 @@ test('POST com 500 ou timeout não é repetido e é marcado como ambíguo', asyn
   for (const handler of [() => jsonResponse(500, {}), () => { throw Object.assign(new Error('aborted'), { name: 'AbortError' }); }]) {
     const fetchImpl = fakeFetch([handler]);
     await assert.rejects(
-      generatePreset('b-roll-de-tela', {}, { client: makeClient(fetchImpl) }),
+      generatePreset('b-roll-de-tela', { prompt: 'x' }, { client: makeClient(fetchImpl) }),
       (err) => err instanceof HiggsfieldError && err.ambiguous === true,
     );
     assert.equal(fetchImpl.calls.length, 1);
@@ -117,7 +125,7 @@ test('POST com 500 ou timeout não é repetido e é marcado como ambíguo', asyn
 
 test('POST com 422 não é ambíguo nem repetido', async () => {
   const fetchImpl = fakeFetch([() => jsonResponse(422, { detail: 'bad' })]);
-  await assert.rejects(generatePreset('b-roll-de-tela', {}, { client: makeClient(fetchImpl) }), (err) => err.kind === 'validation' && !err.ambiguous);
+  await assert.rejects(generatePreset('b-roll-de-tela', { prompt: 'x' }, { client: makeClient(fetchImpl) }), (err) => err.kind === 'validation' && !err.ambiguous);
   assert.equal(fetchImpl.calls.length, 1);
 });
 
@@ -161,16 +169,17 @@ test('catálogo de presets de marca', async () => {
   await assert.rejects(fetchPresetCatalog('b-roll-de-tela', { client: makeClient(fetchImpl) }), PresetInputError);
 });
 
-test('HTTP: POST /api/presets/:name/generate', async (t) => {
-  const fetchImpl = fakeFetch([() => submitted(), () => jsonResponse(200, { status: 'completed', video: { url: 'https://cdn/v.mp4' } })]);
-  const app = createApp({
-    config: { baseUrl: BASE, keyId: 'id', keySecret: 'secret', pollTimeoutMs: 1000 },
-    client: makeClient(fetchImpl),
-    poll: { sleep: noSleep },
-  });
+async function startApp(t, fetchImpl) {
+  const app = createApp({ config: { baseUrl: BASE, keyId: 'id', keySecret: 'secret' }, client: makeClient(fetchImpl) });
   const server = http.createServer(app).listen(0);
   t.after(() => server.close());
-  const base = `http://127.0.0.1:${server.address().port}`;
+  return `http://127.0.0.1:${server.address().port}`;
+}
+
+test('HTTP: generate retorna só { request_id } e status repassa /requests/{id}/status', async (t) => {
+  const statusPayload = { status: 'completed', request_id: 'r1', video: { url: 'https://cdn/v.mp4' } };
+  const fetchImpl = fakeFetch([() => submitted(), () => jsonResponse(200, statusPayload)]);
+  const base = await startApp(t, fetchImpl);
 
   const ok = await fetch(`${base}/api/presets/b-roll-de-tela/generate`, {
     method: 'POST',
@@ -178,14 +187,48 @@ test('HTTP: POST /api/presets/:name/generate', async (t) => {
     body: JSON.stringify({ prompt: 'ondas' }),
   });
   assert.equal(ok.status, 200);
-  const body = await ok.json();
-  assert.equal(body.status, 'completed');
-  assert.equal(body.outputUrl, 'https://cdn/v.mp4');
-  assert.ok(!JSON.stringify(body).includes('secret'));
+  assert.deepEqual(await ok.json(), { request_id: 'r1' });
+  assert.equal(fetchImpl.calls.length, 1); // não faz polling no servidor
+  assert.equal(fetchImpl.calls[0].path, '/minimax/hailuo-2.3/standard/text-to-video');
+  assert.deepEqual(fetchImpl.calls[0].body, { prompt: 'ondas' });
 
-  const bad = await fetch(`${base}/api/presets/corte-para-reels/generate`, { method: 'POST', body: '{}' });
+  const status = await fetch(`${base}/api/presets/status/r1`);
+  assert.equal(status.status, 200);
+  assert.deepEqual(await status.json(), statusPayload);
+  assert.equal(fetchImpl.calls[1].path, '/requests/r1/status');
+
+  const bad = await fetch(`${base}/api/presets/corte-para-reels/generate`, { method: 'POST', body: '{"prompt":"x"}' });
   assert.equal(bad.status, 400);
+  assert.deepEqual((await bad.json()).missing, ['image_url']);
 
   const list = await (await fetch(`${base}/api/presets`)).json();
   assert.equal(list.presets.length, 3);
+  assert.deepEqual(list.presets.map((p) => p.requiresImage), [true, false, false]);
+  assert.ok(!JSON.stringify(list).includes('secret'));
+});
+
+test('HTTP: erros de status indicam se vale consultar de novo', async (t) => {
+  const fetchImpl = fakeFetch([
+    () => jsonResponse(401, {}),
+    ...Array.from({ length: 6 }, () => () => jsonResponse(503, {})),
+  ]);
+  const base = await startApp(t, fetchImpl);
+
+  const auth = await fetch(`${base}/api/presets/status/r1`);
+  assert.equal(auth.status, 502);
+  assert.equal((await auth.json()).retryable, false);
+
+  const down = await fetch(`${base}/api/presets/status/r1`);
+  assert.equal(down.status, 502);
+  assert.equal((await down.json()).retryable, true);
+});
+
+test('HTTP: serve a interface em / sem expor a chave', async (t) => {
+  const base = await startApp(t, fakeFetch([]));
+  const res = await fetch(`${base}/`);
+  assert.equal(res.status, 200);
+  assert.match(res.headers.get('content-type'), /text\/html/);
+  const html = await res.text();
+  assert.match(html, /\/api\/presets\/status\//);
+  assert.ok(!html.includes('api.higgsfield.ai'));
 });
