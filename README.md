@@ -34,6 +34,17 @@ O prompt é obrigatório. A URL de imagem só aparece (e só é obrigatória) no
 Corte para Reels. Presets ficam em `src/presets.js`; adicionar um é adicionar
 uma entrada lá.
 
+### Opções e presets de marca (Imagem de produto)
+
+- **Opções**: proporção, resolução, qualidade e "melhorar o texto" aparecem
+  como seletores. "Padrão" não envia o campo e vale o valor do preset. As
+  opções vêm do campo `options` de cada preset em `src/presets.js`; os valores
+  listados são sugestões, e quem valida é a Higgsfield (recusa aparece na tela).
+- **Preset de marca**: o botão **Carregar presets** busca o catálogo
+  (`GET /marketing-studio/image/presets`). Ao escolher um, a interface pede a
+  URL da foto do produto (obrigatória) e uma de referência (opcional), e envia
+  `preset_id` + `image_urls`; "melhorar o texto" passa a ser Sim por padrão.
+
 ## Rotas do backend
 
 | Método | Rota | O quê |
@@ -42,7 +53,7 @@ uma entrada lá.
 | POST | `/api/presets/:name/generate` | Recebe `{ prompt, image_url? }`, dispara o POST do preset e retorna `{ request_id }` |
 | GET | `/api/presets/status/:request_id` | Repassa `GET /requests/{request_id}/status` |
 | GET | `/api/presets` | Lista os presets (usada pela interface para montar as abas) |
-| GET | `/api/presets/:name/catalog` | Presets de marca do Marketing Studio (de uma etapa anterior; a interface não usa) |
+| GET | `/api/presets/:name/catalog` | Catálogo de presets de marca do Marketing Studio (usado pela interface) |
 
 ## Fluxo assíncrono e erros
 

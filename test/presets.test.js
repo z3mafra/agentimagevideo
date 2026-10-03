@@ -232,3 +232,35 @@ test('HTTP: serve a interface em / sem expor a chave', async (t) => {
   assert.match(html, /\/api\/presets\/status\//);
   assert.ok(!html.includes('api.higgsfield.ai'));
 });
+
+test('HTTP: lista opções e catálogo; generate repassa opções e preset de marca', async (t) => {
+  const catalog = { items: [{ id: 'p1', name: 'Minimalista' }] };
+  const fetchImpl = fakeFetch([() => jsonResponse(200, catalog), () => submitted()]);
+  const base = await startApp(t, fetchImpl);
+
+  const { presets } = await (await fetch(`${base}/api/presets`)).json();
+  const produto = presets.find((p) => p.key === 'imagem-de-produto');
+  assert.equal(produto.hasCatalog, true);
+  assert.deepEqual(produto.options.map((o) => o.field), ['aspect_ratio', 'resolution', 'quality', 'enhance_prompt']);
+  assert.equal(produto.options.find((o) => o.field === 'resolution').default, '2k');
+  assert.equal(produto.options.find((o) => o.field === 'enhance_prompt').default, false);
+  assert.deepEqual(presets.find((p) => p.key === 'b-roll-de-tela').options, []);
+  for (const p of Object.values(PRESETS)) {
+    for (const field of Object.keys(p.options ?? {})) assert.ok(field in p.fields, `${field} precisa estar em fields`);
+  }
+
+  const cat = await fetch(`${base}/api/presets/imagem-de-produto/catalog`);
+  assert.deepEqual(await cat.json(), catalog);
+  assert.equal(fetchImpl.calls[0].path, '/marketing-studio/image/presets');
+
+  const res = await fetch(`${base}/api/presets/imagem-de-produto/generate`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ prompt: 'vaso', aspect_ratio: '9:16', preset_id: 'p1', image_urls: ['https://cdn/p.png'] }),
+  });
+  assert.equal(res.status, 200);
+  assert.deepEqual(fetchImpl.calls[1].body, {
+    prompt: 'vaso', resolution: '2k', aspect_ratio: '9:16', quality: 'high', enhance_prompt: true,
+    preset_id: 'p1', image_urls: ['https://cdn/p.png'],
+  });
+});

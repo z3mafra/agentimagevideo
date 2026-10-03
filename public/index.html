@@ -27,9 +27,14 @@
   .tab[aria-selected="true"] { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
   .tab:disabled { cursor: not-allowed; opacity: 0.6; }
   label { display: block; font-weight: 600; margin: 16px 0 6px; }
-  textarea, input[type="url"] { width: 100%; padding: 10px 12px; border: 1px solid var(--border); border-radius: 8px;
+  textarea, input[type="url"], select { width: 100%; padding: 10px 12px; border: 1px solid var(--border); border-radius: 8px;
          background: var(--bg); color: var(--text); font: inherit; }
   textarea { min-height: 110px; resize: vertical; }
+  .options { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 0 12px; align-items: end; }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  .row select { flex: 1 1 200px; width: auto; }
+  fieldset { border: 1px solid var(--border); border-radius: 8px; margin: 20px 0 0; padding: 4px 14px 14px; }
+  legend { font-weight: 600; padding: 0 6px; }
   .hint { color: var(--muted); font-size: 0.85rem; margin-top: 4px; }
   .actions { margin-top: 20px; display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
   button.primary { background: var(--accent); color: var(--accent-text); border: 0; border-radius: 8px; padding: 10px 22px;
@@ -68,6 +73,26 @@
         <div class="hint">Cole o link público de uma imagem (começando com https://).</div>
       </div>
 
+      <div id="optionsField" hidden>
+        <div class="options" id="options"></div>
+      </div>
+
+      <fieldset id="brandField" hidden>
+        <legend>Preset de marca (opcional)</legend>
+        <label for="brandPreset">Estilo de marca</label>
+        <div class="row">
+          <select id="brandPreset"><option value="">Nenhum</option></select>
+          <button type="button" class="secondary" id="loadCatalog">Carregar presets</button>
+        </div>
+        <div class="hint" id="brandHint">Clique em "Carregar presets" para buscar os estilos disponíveis na sua conta.</div>
+        <div id="brandImages" hidden>
+          <label for="brandProduct">URL da imagem do produto</label>
+          <input id="brandProduct" type="url" placeholder="https://..." inputmode="url">
+          <label for="brandRef">URL da imagem de referência (opcional)</label>
+          <input id="brandRef" type="url" placeholder="https://..." inputmode="url">
+        </div>
+      </fieldset>
+
       <div class="actions">
         <button type="submit" class="primary" id="generate">Gerar</button>
       </div>
@@ -98,7 +123,11 @@
     tabs: $('tabs'), form: $('form'), prompt: $('prompt'), imageField: $('imageField'), imageUrl: $('imageUrl'),
     generate: $('generate'), status: $('status'), statusTitle: $('statusTitle'), statusDetail: $('statusDetail'),
     statusActions: $('statusActions'), resume: $('resume'), preview: $('preview'),
+    optionsField: $('optionsField'), options: $('options'), brandField: $('brandField'), brandPreset: $('brandPreset'),
+    loadCatalog: $('loadCatalog'), brandHint: $('brandHint'), brandImages: $('brandImages'),
+    brandProduct: $('brandProduct'), brandRef: $('brandRef'),
   };
+  const catalogs = {};     // presets de marca já carregados, por preset
 
   let presets = [];
   let active = null;       // preset selecionado
@@ -112,6 +141,7 @@
     els.generate.disabled = value;
     els.generate.textContent = value ? 'Gerando...' : 'Gerar';
     els.tabs.querySelectorAll('button').forEach((b) => { b.disabled = value; });
+    els.loadCatalog.disabled = value;
   }
 
   function showStatus(kind, title, detail = '', { spinner = false, resumable = false } = {}) {
@@ -151,12 +181,88 @@
     }
   }
 
+  const formatChoice = (v, labels = {}) => (v === true ? 'Sim' : v === false ? 'Não' : labels[v] ?? String(v));
+
+  // Um seletor por opção do preset. "Padrão" (valor vazio) não envia o campo.
+  function renderOptions() {
+    els.options.textContent = '';
+    const options = active.options || [];
+    els.optionsField.hidden = !options.length;
+    for (const o of options) {
+      const id = `opt-${o.field}`;
+      const label = document.createElement('label');
+      label.htmlFor = id;
+      label.textContent = o.label;
+      const select = document.createElement('select');
+      select.id = id;
+      select.dataset.field = o.field;
+      select.add(new Option(o.default === null ? 'Padrão' : `Padrão (${formatChoice(o.default, o.labels)})`, ''));
+      for (const c of o.choices) {
+        if (c !== o.default) select.add(new Option(formatChoice(c, o.labels), JSON.stringify(c)));
+      }
+      const wrap = document.createElement('div');
+      wrap.append(label, select);
+      els.options.appendChild(wrap);
+    }
+  }
+
+  // A resposta do catálogo pode vir como lista ou embrulhada em items/presets/data.
+  function normalizeCatalog(data) {
+    const list = Array.isArray(data) ? data : data?.items || data?.presets || data?.data || data?.results || [];
+    return list
+      .map((item) => {
+        const id = item?.id ?? item?.preset_id;
+        return id === undefined || id === null ? null : { id: String(id), name: String(item.name ?? item.title ?? id) };
+      })
+      .filter(Boolean);
+  }
+
+  function renderCatalog() {
+    const list = catalogs[active.key];
+    els.brandPreset.length = 1;
+    els.brandPreset.value = '';
+    els.brandImages.hidden = true;
+    els.brandPreset.disabled = !list;
+    els.loadCatalog.hidden = !!list;
+    if (!list) {
+      els.brandHint.textContent = 'Clique em "Carregar presets" para buscar os estilos disponíveis na sua conta.';
+      return;
+    }
+    for (const item of list) els.brandPreset.add(new Option(item.name, item.id));
+    els.brandHint.textContent = list.length
+      ? 'Com um preset de marca você informa a foto do produto; "Melhorar o texto" passa a ser Sim por padrão.'
+      : 'Nenhum preset de marca disponível na sua conta.';
+  }
+
+  async function loadCatalog() {
+    const preset = active;
+    els.loadCatalog.disabled = true;
+    els.brandHint.textContent = 'Carregando presets de marca...';
+    try {
+      const res = await fetch(`/api/presets/${encodeURIComponent(preset.key)}/catalog`, { cache: 'no-store' });
+      const data = await readBody(res);
+      if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+      catalogs[preset.key] = normalizeCatalog(data);
+      if (active === preset) renderCatalog();
+    } catch (err) {
+      if (active === preset) els.brandHint.textContent = `Não foi possível carregar os presets de marca: ${err.message}`;
+    } finally {
+      els.loadCatalog.disabled = busy;
+    }
+  }
+
   function selectPreset(key) {
     if (busy) return;
     active = presets.find((p) => p.key === key);
     els.imageField.hidden = !active.requiresImage;
+    els.brandField.hidden = !active.hasCatalog;
+    renderOptions();
+    if (active.hasCatalog) renderCatalog();
     renderTabs();
   }
+
+  els.loadCatalog.addEventListener('click', () => { if (!busy) loadCatalog(); });
+  els.brandPreset.addEventListener('change', () => { els.brandImages.hidden = !els.brandPreset.value; });
 
   function renderPreview(preset, result) {
     els.preview.textContent = '';
@@ -283,6 +389,26 @@
       }
       payload.image_url = imageUrl;
     }
+    for (const select of els.options.querySelectorAll('select')) {
+      if (select.value) payload[select.dataset.field] = JSON.parse(select.value);
+    }
+    if (active.hasCatalog && els.brandPreset.value) {
+      const product = safeUrl(els.brandProduct.value.trim());
+      if (!product) {
+        showStatus('err', 'Com preset de marca, informe a URL da imagem do produto (https://...).');
+        els.brandProduct.focus();
+        return;
+      }
+      const refRaw = els.brandRef.value.trim();
+      const ref = refRaw ? safeUrl(refRaw) : null;
+      if (refRaw && !ref) {
+        showStatus('err', 'A URL da imagem de referência não é válida (https://...).');
+        els.brandRef.focus();
+        return;
+      }
+      payload.preset_id = els.brandPreset.value;
+      payload.image_urls = ref ? [product, ref] : [product];
+    }
 
     const preset = active;
     els.preview.textContent = '';
@@ -300,7 +426,8 @@
       });
       const data = await readBody(res);
       if (!res.ok || !data.request_id) {
-        const extra = data.missing ? ` Campos faltando: ${data.missing.join(', ')}.` : '';
+        const extra = data.missing ? ` Campos faltando: ${data.missing.join(', ')}.`
+          : data.upstream ? ` Resposta da Higgsfield: ${JSON.stringify(data.upstream).slice(0, 300)}` : '';
         showStatus('err', 'Não foi possível iniciar a geração.', `${data.error || `HTTP ${res.status}`}${extra}`);
         setBusy(false);
         return;
