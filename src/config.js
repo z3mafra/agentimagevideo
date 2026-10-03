@@ -7,6 +7,5 @@ export function loadConfig(env = process.env) {
     keyId: env.HF_API_KEY_ID || '',
     keySecret: env.HF_API_KEY_SECRET || '',
     port: Number(env.PORT || 3000),
-    pollTimeoutMs: Number(env.POLL_TIMEOUT_MS || 10 * 60 * 1000),
   };
 }

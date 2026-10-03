@@ -5,6 +5,8 @@
 // - bodyBase: campos fixos do preset (só são substituídos se o usuário os enviar).
 // - fields: únicos campos que o usuário pode enviar (os documentados para o endpoint).
 // - outputUrl: onde fica a mídia no payload de status `completed`.
+// - options (opcional): campos opcionais que a interface mostra como seletores.
+//   Escolher "Padrão" na interface não envia o campo (vale o bodyBase).
 //
 // Adicionar um preset = adicionar uma entrada aqui.
 
@@ -45,6 +47,13 @@ export const PRESETS = {
         return 'Com "preset_id" é preciso enviar "image_urls" com 1–2 URLs (produto + referência opcional).';
       }
       if (inputs.enhance_prompt === undefined) body.enhance_prompt = true;
+    },
+    // Valores sugeridos na interface; a API continua sendo quem valida (erros voltam como 422).
+    options: {
+      aspect_ratio: { label: 'Proporção', choices: ['1:1', '4:5', '3:4', '2:3', '9:16', '16:9'] },
+      resolution: { label: 'Resolução', choices: ['1k', '2k', '4k'] },
+      quality: { label: 'Qualidade', choices: ['medium', 'high'], labels: { medium: 'Média', high: 'Alta' } },
+      enhance_prompt: { label: 'Melhorar o texto automaticamente', choices: [true, false] },
     },
     catalogEndpoint: '/marketing-studio/image/presets',
     outputUrl: (result) => result?.images?.[0]?.url ?? null,
@@ -88,5 +97,13 @@ export function listPresets(presets = PRESETS) {
     bodyBase: p.bodyBase,
     fields: Object.keys(p.fields),
     requiresImage: !!p.fields.image_url?.required,
+    options: Object.entries(p.options ?? {}).map(([field, o]) => ({
+      field,
+      label: o.label,
+      choices: o.choices,
+      labels: o.labels ?? {},
+      default: p.bodyBase[field] ?? null,
+    })),
+    hasCatalog: !!p.catalogEndpoint,
   }));
 }
