@@ -1,6 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
 import { createClient, HiggsfieldError } from '../src/higgsfieldClient.js';
 import { buildPresetRequest, generatePreset, PresetInputError, pollStatus, fetchPresetCatalog } from '../src/generatePreset.js';
 import { resolvePreset, PRESETS } from '../src/presets.js';
@@ -169,8 +172,14 @@ test('catálogo de presets de marca', async () => {
   await assert.rejects(fetchPresetCatalog('b-roll-de-tela', { client: makeClient(fetchImpl) }), PresetInputError);
 });
 
-async function startApp(t, fetchImpl) {
-  const app = createApp({ config: { baseUrl: BASE, keyId: 'id', keySecret: 'secret' }, client: makeClient(fetchImpl) });
+async function startApp(t, fetchImpl, { cdnFetch = async () => { throw new Error('download inesperado'); } } = {}) {
+  const dataDir = await mkdtemp(path.join(os.tmpdir(), 'aiv-test-'));
+  t.after(() => rm(dataDir, { recursive: true, force: true }));
+  const app = createApp({
+    config: { baseUrl: BASE, keyId: 'id', keySecret: 'secret', dataDir },
+    client: makeClient(fetchImpl),
+    fetchImpl: cdnFetch,
+  });
   const server = http.createServer(app).listen(0);
   t.after(() => server.close());
   return `http://127.0.0.1:${server.address().port}`;
@@ -179,7 +188,7 @@ async function startApp(t, fetchImpl) {
 test('HTTP: generate retorna só { request_id } e status repassa /requests/{id}/status', async (t) => {
   const statusPayload = { status: 'completed', request_id: 'r1', video: { url: 'https://cdn/v.mp4' } };
   const fetchImpl = fakeFetch([() => submitted(), () => jsonResponse(200, statusPayload)]);
-  const base = await startApp(t, fetchImpl);
+  const base = await startApp(t, fetchImpl, { cdnFetch: async () => new Response('vid', { headers: { 'content-type': 'video/mp4' } }) });
 
   const ok = await fetch(`${base}/api/presets/b-roll-de-tela/generate`, {
     method: 'POST',
@@ -194,7 +203,7 @@ test('HTTP: generate retorna só { request_id } e status repassa /requests/{id}/
 
   const status = await fetch(`${base}/api/presets/status/r1`);
   assert.equal(status.status, 200);
-  assert.deepEqual(await status.json(), statusPayload);
+  assert.deepEqual(await status.json(), { ...statusPayload, local_url: '/media/r1.mp4' });
   assert.equal(fetchImpl.calls[1].path, '/requests/r1/status');
 
   const bad = await fetch(`${base}/api/presets/corte-para-reels/generate`, { method: 'POST', body: '{"prompt":"x"}' });
@@ -263,4 +272,83 @@ test('HTTP: lista opções e catálogo; generate repassa opções e preset de ma
     prompt: 'vaso', resolution: '2k', aspect_ratio: '9:16', quality: 'high', enhance_prompt: true,
     preset_id: 'p1', image_urls: ['https://cdn/p.png'],
   });
+});
+
+test('histórico: registra, baixa a mídia uma vez, serve com Range e apaga', async (t) => {
+  const done = { status: 'completed', request_id: 'r9', images: [{ url: 'https://cdn.example/out/img' }] };
+  const fetchImpl = fakeFetch([() => submitted('r9'), () => jsonResponse(200, { status: 'in_progress' }), () => jsonResponse(200, done), () => jsonResponse(200, done)]);
+  const downloads = [];
+  const cdnFetch = async (url) => {
+    downloads.push(url);
+    return new Response('0123456789', { headers: { 'content-type': 'image/png', 'content-length': '10' } });
+  };
+  const base = await startApp(t, fetchImpl, { cdnFetch });
+  const post = (body) => fetch(`${base}/api/presets/imagem-de-produto/generate`, {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
+  });
+
+  assert.equal((await post({ prompt: 'vaso azul' })).status, 200);
+  let { items } = await (await fetch(`${base}/api/history`)).json();
+  assert.equal(items.length, 1);
+  assert.equal(items[0].status, 'queued');
+  assert.equal(items[0].prompt, 'vaso azul');
+  assert.equal(items[0].presetName, 'Imagem de produto');
+
+  assert.equal((await (await fetch(`${base}/api/presets/status/r9`)).json()).local_url, null);
+  const [a, b] = await Promise.all([fetch(`${base}/api/presets/status/r9`), fetch(`${base}/api/presets/status/r9`)]);
+  assert.equal((await a.json()).local_url, '/media/r9.png');
+  assert.equal((await b.json()).local_url, '/media/r9.png');
+  assert.deepEqual(downloads, ['https://cdn.example/out/img']); // baixou só uma vez
+
+  ({ items } = await (await fetch(`${base}/api/history`)).json());
+  assert.equal(items[0].status, 'completed');
+  assert.equal(items[0].remote_url, 'https://cdn.example/out/img');
+  assert.equal(items[0].local_url, '/media/r9.png');
+
+  const full = await fetch(`${base}/media/r9.png`);
+  assert.equal(full.headers.get('content-type'), 'image/png');
+  assert.equal(await full.text(), '0123456789');
+  const part = await fetch(`${base}/media/r9.png`, { headers: { range: 'bytes=2-4' } });
+  assert.equal(part.status, 206);
+  assert.equal(part.headers.get('content-range'), 'bytes 2-4/10');
+  assert.equal(await part.text(), '234');
+
+  for (const bad of ['..%2Fhistory.json', 'r9.png.part', 'r9.html', 'nao-existe.png']) {
+    assert.equal((await fetch(`${base}/media/${bad}`)).status, 404, bad);
+  }
+
+  assert.equal((await fetch(`${base}/api/history/r9`, { method: 'DELETE' })).status, 200);
+  assert.equal((await fetch(`${base}/media/r9.png`)).status, 404);
+  assert.deepEqual((await (await fetch(`${base}/api/history`)).json()).items, []);
+  assert.equal((await fetch(`${base}/api/history/r9`, { method: 'DELETE' })).status, 404);
+});
+
+test('histórico: falha no download não quebra o status e mantém o link remoto', async (t) => {
+  const done = { status: 'completed', video: { url: 'https://cdn.example/v.mp4' } };
+  const fetchImpl = fakeFetch([() => submitted('r5'), () => jsonResponse(200, done)]);
+  const base = await startApp(t, fetchImpl, { cdnFetch: async () => new Response('', { status: 403 }) });
+  await fetch(`${base}/api/presets/b-roll-de-tela/generate`, { method: 'POST', body: '{"prompt":"mar"}' });
+  const status = await fetch(`${base}/api/presets/status/r5`);
+  assert.equal(status.status, 200);
+  assert.equal((await status.json()).local_url, null);
+  const [item] = (await (await fetch(`${base}/api/history`)).json()).items;
+  assert.equal(item.status, 'completed');
+  assert.equal(item.remote_url, 'https://cdn.example/v.mp4');
+  assert.match(item.error, /cópia local falhou/);
+});
+
+test('histórico: persiste em disco entre reinícios', async () => {
+  const { createHistory } = await import('../src/history.js');
+  const dataDir = await mkdtemp(path.join(os.tmpdir(), 'aiv-test-'));
+  try {
+    const h1 = createHistory({ dataDir });
+    await h1.add({ request_id: 'r1', preset: 'b-roll-de-tela', presetName: 'B-roll de tela', mediaType: 'video', inputs: { prompt: 'x' } });
+    await h1.flush();
+    const saved = JSON.parse(await readFile(path.join(dataDir, 'history.json'), 'utf8'));
+    assert.equal(saved[0].request_id, 'r1');
+    const h2 = createHistory({ dataDir });
+    assert.equal((await h2.list())[0].prompt, 'x');
+  } finally {
+    await rm(dataDir, { recursive: true, force: true });
+  }
 });
