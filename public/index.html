@@ -53,7 +53,26 @@
   @keyframes spin { to { transform: rotate(360deg); } }
   #preview { margin-top: 20px; }
   #preview img, #preview video { max-width: 100%; border-radius: 8px; display: block; background: #000; }
-  #preview a { display: inline-block; margin-top: 8px; color: var(--accent); }
+  #preview a { display: inline-block; margin-top: 8px; margin-right: 16px; color: var(--accent); }
+  .history { margin-top: 24px; }
+  .history h2 { font-size: 1.15rem; margin: 0 0 12px; }
+  .history-empty { color: var(--muted); }
+  .item { display: grid; grid-template-columns: 112px 1fr; gap: 12px; padding: 12px 0; border-top: 1px solid var(--border); }
+  .item:first-of-type { border-top: 0; }
+  .thumb { width: 112px; height: 112px; border-radius: 8px; background: var(--bg); border: 1px solid var(--border);
+         object-fit: cover; display: flex; align-items: center; justify-content: center; color: var(--muted);
+         font-size: 0.8rem; text-align: center; overflow: hidden; }
+  .item-meta { color: var(--muted); font-size: 0.82rem; }
+  .item-prompt { margin: 4px 0 8px; overflow-wrap: anywhere; display: -webkit-box; -webkit-line-clamp: 3;
+         -webkit-box-orient: vertical; overflow: hidden; }
+  .badge { display: inline-block; font-size: 0.75rem; padding: 1px 8px; border-radius: 999px; border: 1px solid var(--border); }
+  .badge.ok { color: var(--ok); border-color: var(--ok); } .badge.err { color: var(--err); border-color: var(--err); }
+  .badge.warn { color: var(--warn); border-color: var(--warn); }
+  .item-actions { display: flex; flex-wrap: wrap; gap: 6px 14px; font-size: 0.9rem; }
+  .linkish { background: none; border: 0; padding: 0; font: inherit; color: var(--accent); cursor: pointer; text-decoration: underline; }
+  .linkish.danger { color: var(--err); }
+  .item-actions a { color: var(--accent); }
+  @media (max-width: 420px) { .item { grid-template-columns: 80px 1fr; } .thumb { width: 80px; height: 80px; } }
   [hidden] { display: none !important; }
 </style>
 </head>
@@ -70,7 +89,7 @@
       <div id="imageField" hidden>
         <label for="imageUrl">URL da imagem (primeiro quadro do vídeo)</label>
         <input id="imageUrl" type="url" placeholder="https://..." inputmode="url">
-        <div class="hint">Cole o link público de uma imagem (começando com https://).</div>
+        <div class="hint">Cole o link direto da imagem (ex.: https://i.imgur.com/XXXX.jpeg), não o link da página.</div>
       </div>
 
       <div id="optionsField" hidden>
@@ -108,6 +127,11 @@
 
     <div id="preview"></div>
   </div>
+
+  <section class="card history" aria-labelledby="historyTitle">
+    <h2 id="historyTitle">Histórico</h2>
+    <div id="history"><p class="history-empty">Carregando...</p></div>
+  </section>
 </main>
 
 <script>
@@ -125,7 +149,7 @@
     statusActions: $('statusActions'), resume: $('resume'), preview: $('preview'),
     optionsField: $('optionsField'), options: $('options'), brandField: $('brandField'), brandPreset: $('brandPreset'),
     loadCatalog: $('loadCatalog'), brandHint: $('brandHint'), brandImages: $('brandImages'),
-    brandProduct: $('brandProduct'), brandRef: $('brandRef'),
+    brandProduct: $('brandProduct'), brandRef: $('brandRef'), history: $('history'),
   };
   const catalogs = {};     // presets de marca já carregados, por preset
 
@@ -157,11 +181,37 @@
     els.statusActions.hidden = !resumable;
   }
 
-  function safeUrl(value) {
+  function safeUrl(value, { allowRelative = false } = {}) {
     try {
-      const u = new URL(value);
+      const u = allowRelative ? new URL(value, location.href) : new URL(value);
       return u.protocol === 'https:' || u.protocol === 'http:' ? u.href : null;
     } catch { return null; }
+  }
+
+  // Links de página (post do Instagram, galeria do Imgur) não são a imagem em si.
+  function pageLinkProblem(url) {
+    const u = new URL(url);
+    const host = u.hostname.replace(/^www\./, '');
+    const isPage = (host === 'imgur.com' && !/\.(jpe?g|png|webp|gif)$/i.test(u.pathname))
+      || (host === 'instagram.com' && /^\/(p|reel|stories)\//.test(u.pathname));
+    return isPage
+      ? 'Esse link é de uma página, não da imagem. Abra-o, clique com o botão direito na foto e use '
+        + '"Copiar endereço da imagem" (algo como https://i.imgur.com/XXXX.jpeg).'
+      : null;
+  }
+
+  // Valida uma URL de imagem digitada; mostra o erro e devolve null se não servir.
+  function readImageUrl(input, emptyMessage, { optional = false } = {}) {
+    const raw = input.value.trim();
+    if (!raw && optional) return '';
+    const url = safeUrl(raw);
+    const problem = !url ? emptyMessage : pageLinkProblem(url);
+    if (problem) {
+      showStatus('err', problem);
+      input.focus();
+      return null;
+    }
+    return url;
   }
 
   function renderTabs() {
@@ -266,8 +316,9 @@
 
   function renderPreview(preset, result) {
     els.preview.textContent = '';
-    const raw = preset.mediaType === 'image' ? result?.images?.[0]?.url : result?.video?.url;
-    const url = safeUrl(raw);
+    const remote = safeUrl(preset.mediaType === 'image' ? result?.images?.[0]?.url : result?.video?.url);
+    const local = result?.local_url ? safeUrl(result.local_url, { allowRelative: true }) : null;
+    const url = local || remote;
     if (!url) {
       showStatus('warn', 'Concluído, mas a resposta não trouxe o link da mídia.', JSON.stringify(result).slice(0, 500));
       return;
@@ -279,6 +330,154 @@
     const link = document.createElement('a');
     link.href = url; link.target = '_blank'; link.rel = 'noopener'; link.textContent = 'Abrir em nova aba';
     els.preview.append(media, link);
+    if (local) els.preview.append(downloadLink(local, 'Baixar'));
+  }
+
+  function downloadLink(url, text) {
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = '';
+    a.textContent = text;
+    return a;
+  }
+
+  // ---------- Histórico ----------
+  const STATUS_LABEL = {
+    queued: ['Na fila', ''], in_progress: ['Gerando', ''], completed: ['Pronto', 'ok'],
+    failed: ['Falhou', 'err'], nsfw: ['Bloqueado (NSFW)', 'err'], canceled: ['Cancelado', 'warn'],
+  };
+  const dateFmt = new Intl.DateTimeFormat('pt-BR', { dateStyle: 'short', timeStyle: 'short' });
+
+  async function loadHistory() {
+    try {
+      const res = await fetch('/api/history', { cache: 'no-store' });
+      const data = await readBody(res);
+      if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+      renderHistory(data.items || []);
+    } catch (err) {
+      els.history.textContent = '';
+      const p = document.createElement('p');
+      p.className = 'history-empty';
+      p.textContent = `Não foi possível carregar o histórico: ${err.message}`;
+      els.history.appendChild(p);
+    }
+  }
+
+  function renderHistory(items) {
+    els.history.textContent = '';
+    if (!items.length) {
+      const p = document.createElement('p');
+      p.className = 'history-empty';
+      p.textContent = 'Nenhuma geração ainda. O que você gerar aparece aqui, com uma cópia salva no servidor.';
+      els.history.appendChild(p);
+      return;
+    }
+    for (const item of items) els.history.appendChild(renderItem(item));
+  }
+
+  function renderItem(item) {
+    const row = document.createElement('div');
+    row.className = 'item';
+    const local = item.local_url ? safeUrl(item.local_url, { allowRelative: true }) : null;
+    const remote = item.remote_url ? safeUrl(item.remote_url) : null;
+    const mediaUrl = local || remote;
+
+    let thumb;
+    if (mediaUrl && item.mediaType === 'image') {
+      thumb = document.createElement('img');
+      thumb.src = mediaUrl;
+      thumb.alt = item.prompt;
+      thumb.loading = 'lazy';
+    } else if (mediaUrl) {
+      thumb = document.createElement('video');
+      thumb.src = mediaUrl;
+      thumb.muted = true;
+      thumb.preload = 'metadata';
+      thumb.playsInline = true;
+      thumb.addEventListener('mouseenter', () => thumb.play().catch(() => {}));
+      thumb.addEventListener('mouseleave', () => thumb.pause());
+    } else {
+      thumb = document.createElement('div');
+      thumb.textContent = item.mediaType === 'image' ? 'Imagem' : 'Vídeo';
+    }
+    thumb.classList.add('thumb');
+
+    const body = document.createElement('div');
+    const meta = document.createElement('div');
+    meta.className = 'item-meta';
+    const [label, kind] = STATUS_LABEL[item.status] || [item.status, ''];
+    const badge = document.createElement('span');
+    badge.className = `badge ${kind}`;
+    badge.textContent = label;
+    const when = item.created_at ? dateFmt.format(new Date(item.created_at)) : '';
+    meta.append(badge, document.createTextNode(` ${item.presetName || item.preset} · ${when}`));
+
+    const prompt = document.createElement('div');
+    prompt.className = 'item-prompt';
+    prompt.textContent = item.prompt;
+    prompt.title = item.prompt;
+
+    const actions = document.createElement('div');
+    actions.className = 'item-actions';
+    if (local) actions.appendChild(downloadLink(local, 'Baixar'));
+    if (mediaUrl) {
+      const open = document.createElement('a');
+      open.href = mediaUrl; open.target = '_blank'; open.rel = 'noopener'; open.textContent = 'Abrir';
+      actions.appendChild(open);
+    }
+    if (item.status === 'completed' && !local) {
+      const note = document.createElement('span');
+      note.className = 'item-meta';
+      note.textContent = 'Sem cópia local (o link da Higgsfield pode expirar).';
+      actions.appendChild(note);
+    }
+    const preset = presets.find((p) => p.key === item.preset);
+    if (!TERMINAL.includes(item.status) && preset) {
+      actions.appendChild(actionButton('Continuar consultando', () => {
+        if (!busy) { selectPreset(preset.key); runPoll(item.request_id, preset); }
+      }));
+    }
+    if (preset) {
+      actions.appendChild(actionButton('Reusar texto', () => {
+        if (busy) return;
+        selectPreset(preset.key);
+        els.prompt.value = item.prompt;
+        if (preset.requiresImage && item.inputs?.image_url) els.imageUrl.value = item.inputs.image_url;
+        els.prompt.focus();
+        window.scrollTo({ top: 0, behavior: 'smooth' });
+      }));
+    }
+    // Uma imagem pronta pode virar o primeiro quadro de um vídeo (precisa do link público).
+    const reels = presets.find((p) => p.requiresImage);
+    if (item.mediaType === 'image' && remote && reels) {
+      actions.appendChild(actionButton('Animar em vídeo', () => {
+        if (busy) return;
+        selectPreset(reels.key);
+        els.imageUrl.value = remote;
+        els.prompt.value = '';
+        els.prompt.focus();
+        window.scrollTo({ top: 0, behavior: 'smooth' });
+      }));
+    }
+    actions.appendChild(actionButton('Excluir', async () => {
+      if (!confirm('Excluir este item do histórico e a cópia salva?')) return;
+      const res = await fetch(`/api/history/${encodeURIComponent(item.request_id)}`, { method: 'DELETE' }).catch(() => null);
+      if (!res || !res.ok) showStatus('err', 'Não foi possível excluir o item.');
+      loadHistory();
+    }, 'danger'));
+
+    body.append(meta, prompt, actions);
+    row.append(thumb, body);
+    return row;
+  }
+
+  function actionButton(text, onClick, extraClass = '') {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = `linkish ${extraClass}`.trim();
+    b.textContent = text;
+    b.addEventListener('click', onClick);
+    return b;
   }
 
   function showTerminal(preset, data, requestId) {
@@ -362,6 +561,7 @@
       await poll(requestId, preset);
     } finally {
       setBusy(false);
+      loadHistory();
     }
   }
 
@@ -381,31 +581,18 @@
     }
     const payload = { prompt };
     if (active.requiresImage) {
-      const imageUrl = safeUrl(els.imageUrl.value.trim());
-      if (!imageUrl) {
-        showStatus('err', 'Informe a URL de uma imagem (https://...).');
-        els.imageUrl.focus();
-        return;
-      }
+      const imageUrl = readImageUrl(els.imageUrl, 'Informe a URL de uma imagem (https://...).');
+      if (!imageUrl) return;
       payload.image_url = imageUrl;
     }
     for (const select of els.options.querySelectorAll('select')) {
       if (select.value) payload[select.dataset.field] = JSON.parse(select.value);
     }
     if (active.hasCatalog && els.brandPreset.value) {
-      const product = safeUrl(els.brandProduct.value.trim());
-      if (!product) {
-        showStatus('err', 'Com preset de marca, informe a URL da imagem do produto (https://...).');
-        els.brandProduct.focus();
-        return;
-      }
-      const refRaw = els.brandRef.value.trim();
-      const ref = refRaw ? safeUrl(refRaw) : null;
-      if (refRaw && !ref) {
-        showStatus('err', 'A URL da imagem de referência não é válida (https://...).');
-        els.brandRef.focus();
-        return;
-      }
+      const product = readImageUrl(els.brandProduct, 'Com preset de marca, informe a URL da imagem do produto (https://...).');
+      if (!product) return;
+      const ref = readImageUrl(els.brandRef, 'A URL da imagem de referência não é válida (https://...).', { optional: true });
+      if (ref === null) return;
       payload.preset_id = els.brandPreset.value;
       payload.image_urls = ref ? [product, ref] : [product];
     }
@@ -440,6 +627,7 @@
       return;
     }
     setBusy(false);
+    loadHistory();
     await runPoll(requestId, preset);
   });
 
@@ -448,6 +636,7 @@
     .then((data) => {
       presets = data.presets || [];
       if (presets.length) selectPreset(presets[0].key);
+      loadHistory();
     })
     .catch(() => showStatus('err', 'Não foi possível carregar os presets. O servidor está rodando?'));
 })();

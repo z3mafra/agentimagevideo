@@ -54,6 +54,9 @@ uma entrada lá.
 | GET | `/api/presets/status/:request_id` | Repassa `GET /requests/{request_id}/status` |
 | GET | `/api/presets` | Lista os presets (usada pela interface para montar as abas) |
 | GET | `/api/presets/:name/catalog` | Catálogo de presets de marca do Marketing Studio (usado pela interface) |
+| GET | `/api/history` | Gerações anteriores, mais recentes primeiro |
+| DELETE | `/api/history/:request_id` | Apaga o registro e a cópia local |
+| GET | `/media/:arquivo` | Cópia local da mídia (com suporte a Range para vídeo) |
 
 ## Fluxo assíncrono e erros
 
@@ -69,3 +72,20 @@ uma entrada lá.
 - Se a consulta demorar demais ou o servidor ficar fora do ar, a interface
   mostra o `request_id` e um botão **Continuar consultando** — que só consulta
   o status, nunca reenvia a geração.
+
+## Histórico e cópias locais
+
+- Cada geração enviada vira um item no **Histórico** (abaixo do formulário), com
+  preset, texto, data e status. Ele continua lá depois de recarregar a página.
+- Quando a geração fica pronta, o servidor **baixa a mídia** para
+  `data/media/<request_id>.<ext>`, porque os links da Higgsfield podem expirar.
+  O registro fica em `data/history.json`. A pasta pode ser trocada com
+  `DATA_DIR` no `.env` e não vai para o Git.
+- Em cada item: **Baixar**, **Abrir**, **Reusar texto**, **Excluir** (apaga o
+  registro e o arquivo) e, para pedidos ainda em andamento, **Continuar
+  consultando** (só consulta, nunca reenvia). Imagens prontas têm **Animar em
+  vídeo**, que abre o Corte para Reels com a imagem como primeiro quadro.
+- Se a cópia falhar, o item mostra o link original da Higgsfield e avisa que
+  ele pode expirar.
+- Ao hospedar o app, use um disco persistente para `DATA_DIR`; em hospedagens
+  com disco temporário o histórico se perde a cada reinício.

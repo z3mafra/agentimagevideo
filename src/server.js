@@ -5,22 +5,28 @@
 //   POST /api/presets/:name/generate         dispara a geração e retorna { request_id }
 //   GET  /api/presets/status/:request_id     repassa GET /requests/{request_id}/status
 //   GET  /api/presets/:name/catalog          presets de marca do Marketing Studio (preset_id)
+//   GET  /api/history                        gerações anteriores (mais recentes primeiro)
+//   DELETE /api/history/:request_id          apaga o registro e a cópia local
+//   GET  /media/:file                        cópia local da mídia gerada
 //
 // O browser só fala com estas rotas; a chave da Higgsfield fica no servidor.
 
 import http from 'node:http';
+import { createReadStream } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { loadConfig } from './config.js';
 import { createClient, HiggsfieldError } from './higgsfieldClient.js';
-import { listPresets } from './presets.js';
+import { listPresets, resolvePreset } from './presets.js';
 import { fetchPresetCatalog, generatePreset, PresetInputError } from './generatePreset.js';
+import { createHistory } from './history.js';
 
 const MAX_BODY_BYTES = 1024 * 1024;
 const INDEX_HTML = fileURLToPath(new URL('../public/index.html', import.meta.url));
 
-export function createApp({ config = loadConfig(), client, fetchImpl = globalThis.fetch } = {}) {
+export function createApp({ config = loadConfig(), client, history, fetchImpl = globalThis.fetch } = {}) {
   client ??= createClient({ baseUrl: config.baseUrl, keyId: config.keyId, keySecret: config.keySecret, fetchImpl });
+  history ??= createHistory({ dataDir: config.dataDir, fetchImpl });
 
   const routes = [
     ['GET', /^\/$/, async () => [200, await readFile(INDEX_HTML, 'utf8'), 'text/html; charset=utf-8']],
@@ -31,13 +37,46 @@ export function createApp({ config = loadConfig(), client, fetchImpl = globalThi
       const inputs = await readJson(req);
       // Só submete (uma vez); o polling é feito pelo frontend via /api/presets/status/:request_id.
       const out = await generatePreset(decodeURIComponent(name), inputs, { client, wait: false });
-      return [200, { request_id: out.submission.request_id }];
+      const requestId = out.submission.request_id;
+      try {
+        const preset = resolvePreset(out.preset);
+        await history.add({ request_id: requestId, preset: preset.key, presetName: preset.name, mediaType: preset.mediaType, inputs });
+      } catch (err) {
+        // A geração já foi aceita: falha no histórico não pode virar erro (o usuário reenviaria).
+        console.error('Falha ao registrar no histórico:', err);
+      }
+      return [200, { request_id: requestId }];
     }],
 
-    ['GET', /^\/api\/presets\/status\/([A-Za-z0-9_-]+)$/, async (req, url, [requestId]) => [
+    ['GET', /^\/api\/presets\/status\/([A-Za-z0-9_-]+)$/, async (req, url, [requestId]) => {
+      const payload = await client.get(`/requests/${requestId}/status`);
+      let entry = null;
+      try {
+        const known = await history.find(requestId);
+        const preset = known && resolvePreset(known.preset);
+        const outputUrl = preset && payload?.status === 'completed' ? preset.outputUrl(payload) : null;
+        entry = await history.recordStatus(requestId, payload, outputUrl);
+      } catch (err) {
+        console.error('Falha ao atualizar o histórico:', err);
+      }
+      return [200, { ...payload, local_url: entry?.file ? `/media/${entry.file}` : null }];
+    }],
+
+    ['GET', /^\/api\/history$/, async () => [
       200,
-      await client.get(`/requests/${requestId}/status`),
+      { items: (await history.list()).map((e) => ({ ...e, local_url: e.file ? `/media/${e.file}` : null })) },
     ]],
+
+    ['DELETE', /^\/api\/history\/([A-Za-z0-9_-]+)$/, async (req, url, [requestId]) => (
+      (await history.remove(requestId)) ? [200, { deleted: requestId }] : [404, { error: 'registro não encontrado', retryable: false }]
+    )],
+
+    ['GET', /^\/media\/([^/]+)$/, async (req, url, [name], res) => {
+      const media = await history.mediaPath(name);
+      if (!media) return [404, { error: 'arquivo não encontrado', retryable: false }];
+      sendFile(req, res, media);
+      return null;
+    }],
 
     ['GET', /^\/api\/presets\/([^/]+)\/catalog$/, async (req, url, [name]) => [
       200,
@@ -51,7 +90,9 @@ export function createApp({ config = loadConfig(), client, fetchImpl = globalThi
       for (const [method, pattern, fn] of routes) {
         const match = url.pathname.match(pattern);
         if (!match || req.method !== method) continue;
-        const [status, body, contentType] = await fn(req, url, match.slice(1));
+        const out = await fn(req, url, match.slice(1), res);
+        if (!out) return; // a rota já respondeu (arquivo em stream)
+        const [status, body, contentType] = out;
         return send(res, status, body, contentType);
       }
       return send(res, 404, { error: 'rota não encontrada', retryable: false });
@@ -102,6 +143,36 @@ function send(res, status, body, contentType = 'application/json; charset=utf-8'
     'Cache-Control': 'no-store',
   });
   res.end(payload);
+}
+
+// Serve um arquivo de mídia com suporte a Range (necessário para avançar/voltar no <video>).
+function sendFile(req, res, { full, size, type }) {
+  const headers = {
+    'Content-Type': type,
+    'Accept-Ranges': 'bytes',
+    'X-Content-Type-Options': 'nosniff',
+    'Cache-Control': 'private, max-age=86400',
+  };
+  const range = /^bytes=(\d*)-(\d*)$/.exec(req.headers.range || '');
+  let start = 0;
+  let end = size - 1;
+  if (range && (range[1] || range[2])) {
+    if (range[1]) {
+      start = Number(range[1]);
+      if (range[2]) end = Math.min(Number(range[2]), size - 1);
+    } else {
+      start = Math.max(0, size - Number(range[2]));
+    }
+    if (start > end || start >= size) {
+      res.writeHead(416, { 'Content-Range': `bytes */${size}` });
+      return res.end();
+    }
+    res.writeHead(206, { ...headers, 'Content-Range': `bytes ${start}-${end}/${size}`, 'Content-Length': end - start + 1 });
+  } else {
+    res.writeHead(200, { ...headers, 'Content-Length': size });
+  }
+  if (req.method === 'HEAD' || size === 0) return res.end();
+  createReadStream(full, { start, end }).on('error', () => res.destroy()).pipe(res);
 }
 
 async function readJson(req) {
